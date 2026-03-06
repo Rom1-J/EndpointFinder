@@ -1,0 +1,31 @@
+{
+  "sinks": [
+    {
+      "name": "apiClient.get",
+      "type": "method",
+      "match": "apiClient.get",
+      "urlArg": 0,
+      "httpMethod": "GET"
+    },
+    {
+      "name": "sdk.call",
+      "type": "method",
+      "match": "sdk.call",
+      "urlArg": 0
+    },
+    {
+      "name": "request",
+      "type": "call",
+      "match": "request",
+      "urlArg": 0
+    },
+    {
+      "name": "http.get",
+      "type": "method",
+      "match": "http.get",
+      "urlArg": 0,
+      "baseURLArg": 1,
+      "httpMethod": "GET"
+    }
+  ]
+}

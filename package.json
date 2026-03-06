@@ -1,0 +1,33 @@
+{
+  "name": "endpointfinder-analyzer",
+  "version": "0.1.0",
+  "description": "AST-based static analyzer for endpoint discovery in JS/TS code",
+  "license": "MIT",
+  "packageManager": "bun@1.3.5",
+  "type": "commonjs",
+  "bin": {
+    "analyze-endpoints": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "bun run src/cli/index.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@babel/generator": "^7.27.0",
+    "@babel/highlight": "^7.25.9",
+    "@babel/parser": "^7.27.0",
+    "@babel/traverse": "^7.27.0",
+    "@babel/types": "^7.27.0",
+    "@jridgewell/trace-mapping": "^0.3.31",
+    "fast-glob": "^3.3.3",
+    "node-html-parser": "^7.0.1"
+  },
+  "devDependencies": {
+    "@types/babel__generator": "^7.27.0",
+    "@types/babel__traverse": "^7.20.8",
+    "@types/node": "^22.13.5",
+    "typescript": "^5.8.2",
+    "vitest": "^2.1.9"
+  }
+}
