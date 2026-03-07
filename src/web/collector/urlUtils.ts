@@ -98,6 +98,22 @@ function countTokenOccurrences(value: string, token: string): number {
   return value.split(token).length - 1;
 }
 
+function firstMeaningfulSpecifierSegment(specifier: string): string | null {
+  const withoutHash = specifier.split("#", 1)[0] ?? specifier;
+  const withoutQuery = withoutHash.split("?", 1)[0] ?? withoutHash;
+  const segments = withoutQuery
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+
+  return segments[0] ?? null;
+}
+
+function hasAdjacentDuplicatedLeadingSegment(pathname: string, segment: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  return parts.length >= 2 && parts[0] === segment && parts[1] === segment;
+}
+
 export function resolveChunkLikeSpecifier(baseUrl: string, specifier: string): string | null {
   const direct = resolveSpecifier(baseUrl, specifier);
   if (!direct) {
@@ -108,7 +124,7 @@ export function resolveChunkLikeSpecifier(baseUrl: string, specifier: string): s
     const base = new URL(baseUrl);
     const directUrl = new URL(direct);
 
-    const firstSegment = specifier.split("/").find((segment) => segment.length > 0);
+    const firstSegment = firstMeaningfulSpecifierSegment(specifier);
     if (!firstSegment) {
       return direct;
     }
@@ -130,7 +146,10 @@ export function resolveChunkLikeSpecifier(baseUrl: string, specifier: string): s
       return resolveSpecifier(anchor.toString(), specifier);
     };
 
-    if (directOccurrences >= 2) {
+    if (
+      directOccurrences >= 2 ||
+      hasAdjacentDuplicatedLeadingSegment(directUrl.pathname, firstSegment)
+    ) {
       const deduped = resolveFromBasePrefix();
       if (deduped) {
         return deduped;
