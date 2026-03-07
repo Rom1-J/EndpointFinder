@@ -1,251 +1,97 @@
-# Endpoint Static Analyzer (AST-Based)
+# EndpointFinder
 
-This project is a practical static JavaScript/TypeScript analyzer for endpoint discovery in front-end apps, including SPA bundles and minified chunk files.
+EndpointFinder is an AST-based static analyzer for JavaScript/TypeScript endpoint discovery.
 
-It is **not** a regex URL grep. It parses source into an AST and performs sink detection plus lightweight value/dataflow resolution.
+It is designed for practical API extraction from source code and bundles (including minified SPA chunks), with shallow alias/wrapper resolution and structured findings.
 
-## What It Does
+## Features
 
-- Detects network sinks such as:
-  - `fetch(url, init)`
-  - `new Request(url, init)`
-  - `XMLHttpRequest.open(method, url, ...)`
-  - `new WebSocket(url)`
-  - `new EventSource(url)`
-  - `navigator.sendBeacon(url, data)`
-  - `axios(config)` / `axios(url)`
-  - `axios.get/post/put/delete/patch(...)`
-  - `axios.create({ baseURL })` instances and derived calls (`client.get(...)`)
-- Supports configurable custom sinks through JSON config
-- Resolves URL expressions with a structured value model:
-  - literals
-  - templates
-  - concatenation
-  - transpiled concat calls (e.g. `"".concat(base, "api/auth/login")`)
-  - identifiers/bindings
-  - object destructuring bindings (`const { baseURL: b } = cfg`)
-  - object property access
-  - conditional unions
-  - `new URL(...)`
-  - `URLSearchParams` (lightweight support)
-- Includes webpack/Next chunk helpers:
-  - resolves local webpack module exports (`n(1234)` patterns)
-  - project-wide cross-file webpack export registry for chunk-to-chunk resolution
-- Performs shallow interprocedural parameter resolution via call sites
-- Resolves shallow sink references and aliases:
-  - variable alias chains (`const a = fetch; const b = a; b("/users")`)
-  - object/member aliases (`api.req = fetch`, `this.http = fetch`, `x.net.req = fetch`)
-  - pass-through wrappers and higher-order forwarding (`(...args) => fetch(...args)`, `wrap(fetch)`)
-  - extracted/bound/destructured methods (`const get = axios.get`, `.bind(...)`, `const { get } = client`)
-  - custom configured sink aliases (`const r = apiClient.get; r("/users")`)
-- Emits findings with source location, confidence, and resolution trace
-- Continues analysis even if some files fail to parse
+- Detects common network sinks: `fetch`, `Request`, `XMLHttpRequest.open`, `axios*`, `WebSocket`, `EventSource`, `sendBeacon`
+- Resolves indirect calls (aliases, wrappers, parameter forwarding, extracted/bound methods)
+- Reconstructs exact URLs or URL templates with confidence levels
+- Supports webpack-style cross-chunk module export resolution
+- Extracts request metadata (headers/body when statically recoverable)
+- Supports custom sink configuration via JSON
+- Exports findings as JSON, OpenAPI/Swagger, Postman, and Burp formats
+- Includes profiling output for performance analysis
 
-## Architecture
+## Quick Install
 
-```text
-src/
-  parser/
-    parseFile.ts
-  sinks/
-    builtinSinks.ts
-    matchSink.ts
-    sinkConfig.ts
-  resolver/
-    valueModel.ts
-    resolveExpression.ts
-    resolveIdentifier.ts
-    resolveCall.ts
-    renderValue.ts
-  analysis/
-    analyzeFile.ts
-    analyzeProject.ts
-    analyzeUrl.ts
-  report/
-    jsonReporter.ts
-    textReporter.ts
-  cli/
-    index.ts
-  web/
-    siteSourceCollector.ts
-```
-
-Core phases:
-
-1. Parse source files to AST (`@babel/parser`)
-2. Build lightweight function call-site index
-3. Match sink calls/constructors
-4. Resolve URL arguments backward through expressions and bindings
-5. Perform shallow interprocedural parameter propagation
-6. Render exact URLs or URL templates
-7. Emit structured findings and CLI summary
-
-## Installation
+Recommended with Bun:
 
 ```bash
 bun install
-```
-
-## Usage
-
-### CLI
-
-```bash
 bun run build
-bun run dist/cli/index.js ./dist
-bun run dist/cli/index.js ./chunk.js --json
-bun run dist/cli/index.js ./dist --export swagger
-bun run dist/cli/index.js ./dist --export postman
-bun run dist/cli/index.js ./dist --export burp
-bun run dist/cli/index.js ./src --config ./examples/custom-sinks.json
-bun run dist/cli/index.js https://example.com --site-mode direct
-bun run dist/cli/index.js https://example.com --site-mode clone --clone-dir ./site-snapshot
 ```
 
-For development without building first:
+Run locally:
 
 ```bash
-bun run dev -- ./dist
+node dist/cli/index.js ./src
 ```
 
-CLI options:
-
-- `--json` output full JSON report
-- `--export <swagger|postman|burp>` export findings as OpenAPI (Swagger), Postman collection, or Burp Repeater request blocks
-- `--config <file>` load custom sink definitions
-- `--unresolved` include unresolved sink candidates
-- `--site-mode <direct|clone>` URL mode (`direct` analyzes fetched sources in-memory; `clone` saves a local snapshot first)
-- `--clone-dir <dir>` output directory for cloned site sources
-- `--max-remote-files <n>` cap the number of remotely fetched script files
-- `--timeout-ms <n>` per-request timeout for remote source fetching
-- `--same-origin-only` restrict remote crawling to the entry URL origin
-
-### Analyze a URL
-
-You can target a live website URL instead of a local path.
-
-- `direct` mode:
-  - fetches entry HTML and script sources
-  - discovers additional chunk/module JS references from parsed AST
-  - analyzes sources directly without writing files
-- `clone` mode:
-  - performs the same discovery
-  - writes fetched HTML/JS sources to `--clone-dir`
-  - analyzes the cloned local copies
-
-### Export to API Tools
-
-You can export the discovered endpoints in formats that can be imported/used by common tooling:
-
-- Swagger / OpenAPI JSON:
+Or without building:
 
 ```bash
-bun run dist/cli/index.js ./dist --export swagger > endpoints.openapi.json
+bun run src/cli/index.ts ./src
 ```
 
-- Postman Collection v2.1 JSON:
+## Quick Usage
 
 ```bash
-bun run dist/cli/index.js ./dist --export postman > endpoints.postman.json
+# Analyze a local project
+node dist/cli/index.js ./dist
+
+# JSON output
+node dist/cli/index.js ./dist --json > findings.json
+
+# URL target (direct mode)
+node dist/cli/index.js https://example.com --site-mode direct
+
+# Export formats
+node dist/cli/index.js ./dist --export swagger > endpoints.openapi.json
+node dist/cli/index.js ./dist --export postman > endpoints.postman.json
+node dist/cli/index.js ./dist --export burp > endpoints.burp.txt
+
+# Performance profile
+node dist/cli/index.js ./dist --profile
 ```
 
-- Burp Repeater raw request blocks:
-
-```bash
-bun run dist/cli/index.js ./dist --export burp > endpoints.burp.txt
-```
-
-### Custom Sink Config
-
-Example: `examples/custom-sinks.json`
+## Example JSON Finding
 
 ```json
 {
-  "sinks": [
-    {
-      "name": "apiClient.get",
-      "type": "method",
-      "match": "apiClient.get",
-      "urlArg": 0,
-      "httpMethod": "GET"
-    }
+  "file": "src/api.ts",
+  "line": 12,
+  "column": 9,
+  "sink": "fetch",
+  "method": "POST",
+  "url": null,
+  "urlTemplate": "${apiBase}/users/${id}",
+  "confidence": "medium",
+  "resolutionTrace": [
+    "Identifier(url)",
+    "TemplateLiteral",
+    "Sink(fetch)"
   ]
 }
 ```
 
-`type` can be `call`, `method`, or `constructor`.
+## Full Documentation
 
-Optional fields:
+See `USAGE.md` for complete documentation:
 
-- `methodArg`: index of argument carrying HTTP method
-- `baseURLArg`: index of argument carrying a base URL to join with `urlArg`
-- `httpMethod`: fixed method when known
+- installation details (Bun/Node)
+- full CLI reference
+- output format guide
+- supported sinks
+- custom sink config format
+- analysis model and limitations
+- performance tuning and profiling
+- practical examples
 
-### Alias-Aware Sink Resolution
-
-The analyzer can follow shallow sink references, so indirect calls are detected in practical patterns:
-
-```js
-const f = fetch;
-f("/users");
-
-function use(requestFn) {
-  return requestFn("/users");
-}
-use(fetch);
-
-const client = axios.create({ baseURL: "https://api.example.com" });
-const get = client.get.bind(client);
-get("/users");
-```
-
-This is intentionally shallow and pragmatic: it targets common reverse-engineering patterns without attempting full program-wide symbolic execution.
-
-## Output
-
-Each finding includes:
-
-- `file`
-- `line`
-- `column`
-- `sink`
-- `method` (if known)
-- `url` (exact when fully resolved)
-- `urlTemplate` (partial/dynamic)
-- `confidence` (`high` / `medium` / `low`)
-- `resolutionTrace`
-- `codeSnippet`
-
-## Confidence Model
-
-- **high**: fully resolved literal URL
-- **medium**: resolved template with dynamic placeholders and low uncertainty
-- **low**: partial or unknown-heavy result
-
-Low-confidence findings are still reported.
-
-## Tests
-
-Run:
+## Development
 
 ```bash
 bun run test
 ```
-
-Current suite covers:
-
-1. Direct sink detection (`fetch`, `Request`, `XMLHttpRequest.open`, `WebSocket`, Axios variants)
-2. URL expression resolution (literal/template/concat/transpiled concat/destructuring)
-3. Axios `baseURL` joins (instance `baseURL`, inline method config `baseURL`, custom `baseURLArg`)
-4. Wrapper and interprocedural propagation (including rest-arg pass-through wrappers)
-5. Alias-aware sink resolution (variable chains, object/member aliases, class `this` aliases)
-6. Method extraction/forwarding (`axios.get` aliasing, `.bind`, destructured methods)
-7. Webpack-style module export resolution for endpoint bases
-8. Request metadata extraction (headers/body, `JSON.stringify`, `FormData` fields)
-9. Configurable custom sinks, including indirect/custom sink method aliases
-
-## Notes and Limits (MVP)
-
-- Designed for practical reverse engineering and auditing value, not full theorem-prover precision
-- Does not attempt to fully model `eval`, generated code, source maps, or deep framework internals
-- Uses shallow interprocedural resolution and conservative fallbacks

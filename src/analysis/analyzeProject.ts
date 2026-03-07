@@ -1,10 +1,12 @@
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import fg from "fast-glob";
-import type { AnalyzeProjectResult } from "../types";
+import type { AnalyzeProjectResult, AnalysisError, Finding } from "../types";
 import { analyzeFile, type AnalyzeSourceOptions } from "./analyzeFile";
 import { collectWebpackExternalModules } from "./webpackRegistry";
 import { normalizeFilePath } from "../utils/ast";
+import { mapWithConcurrency, normalizeConcurrency } from "../utils/concurrency";
+import { elapsedMs, nowMs } from "../utils/perf";
 
 const SOURCE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"]);
 
@@ -39,16 +41,32 @@ export async function analyzeProject(
   targetPath: string,
   options: AnalyzeSourceOptions = {},
 ): Promise<AnalyzeProjectResult> {
+  const totalStart = nowMs();
   const files = await collectSourceFiles(targetPath);
-  const webpackExternalModulesById = await collectWebpackExternalModules(files);
-  const findings = [];
-  const errors = [];
 
-  for (const filePath of files) {
-    const result = await analyzeFile(filePath, {
-      ...options,
-      webpackExternalModulesById,
-    });
+  const registryStart = nowMs();
+  const webpackExternalModulesById = await collectWebpackExternalModules(
+    files,
+    options.concurrency,
+  );
+  const webpackRegistryMs = elapsedMs(registryStart);
+
+  const findings: Finding[] = [];
+  const errors: AnalysisError[] = [];
+  const concurrency = normalizeConcurrency(options.concurrency);
+
+  const fileResults = await mapWithConcurrency(
+    files,
+    concurrency,
+    async (filePath) =>
+      analyzeFile(filePath, {
+        ...options,
+        webpackExternalModulesById,
+      }),
+  );
+
+  fileResults.forEach((result, index) => {
+    const filePath = files[index];
     findings.push(...result.findings);
     errors.push(
       ...result.errors.map((message) => ({
@@ -56,7 +74,25 @@ export async function analyzeProject(
         message,
       })),
     );
-  }
+  });
+
+  const fileTimings = fileResults
+    .map((result) => result.timing)
+    .filter((timing): timing is NonNullable<typeof fileResults[number]["timing"]> =>
+      Boolean(timing),
+    );
+
+  const timings = options.profile
+    ? {
+        totalMs: elapsedMs(totalStart),
+        parseMs: fileTimings.reduce((sum, timing) => sum + timing.parseMs, 0),
+        analysisMs: fileTimings.reduce((sum, timing) => sum + timing.analysisMs, 0),
+        resolverMs: fileTimings.reduce((sum, timing) => sum + timing.resolverMs, 0),
+        fileCount: fileTimings.length,
+        fileTimings,
+        webpackRegistryMs,
+      }
+    : undefined;
 
   return {
     target: normalizeFilePath(path.resolve(targetPath)),
@@ -64,5 +100,6 @@ export async function analyzeProject(
     findings,
     errors,
     sourceMode: "local",
+    timings,
   };
 }

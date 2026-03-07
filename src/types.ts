@@ -37,6 +37,30 @@ export interface AnalyzeFileResult {
   file: string;
   findings: Finding[];
   errors: string[];
+  timing?: FileAnalysisTiming;
+}
+
+export interface FileAnalysisTiming {
+  file: string;
+  parseMs: number;
+  analysisMs: number;
+  resolverMs: number;
+  resolverCalls: number;
+  resolverCacheHits: number;
+  findings: number;
+}
+
+export interface AnalyzeTimings {
+  totalMs: number;
+  parseMs: number;
+  analysisMs: number;
+  resolverMs: number;
+  fileCount: number;
+  fileTimings: FileAnalysisTiming[];
+  webpackRegistryMs?: number;
+  sourceCollectionMs?: number;
+  cloneMs?: number;
+  reportMs?: number;
 }
 
 export interface AnalyzeProjectResult {
@@ -46,4 +70,5 @@ export interface AnalyzeProjectResult {
   errors: AnalysisError[];
   sourceMode?: "local" | "url-direct" | "url-clone";
   clonedTo?: string;
+  timings?: AnalyzeTimings;
 }

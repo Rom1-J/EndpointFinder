@@ -5,8 +5,10 @@ import { analyzeProject } from "../analysis/analyzeProject";
 import { analyzeUrlTarget } from "../analysis/analyzeUrl";
 import { toExportReport, type ExportFormat } from "../report/exportReporter";
 import { toJsonReport } from "../report/jsonReporter";
+import { toProfileReport } from "../report/profileReporter";
 import { toTextReport } from "../report/textReporter";
 import { loadSinkDefinitions } from "../sinks/sinkConfig";
+import { elapsedMs, nowMs } from "../utils/perf";
 
 interface CliOptions {
   target: string | null;
@@ -18,7 +20,9 @@ interface CliOptions {
   cloneDir?: string;
   maxRemoteFiles?: number;
   timeoutMs?: number;
+  concurrency?: number;
   sameOriginOnly: boolean;
+  profile: boolean;
   help: boolean;
 }
 
@@ -45,6 +49,8 @@ function usage(): string {
     "  analyze-endpoints <path|url> [--json] [--export <swagger|postman|burp>] [--config <file>] [--unresolved]",
     "                   [--site-mode <direct|clone>] [--clone-dir <dir>]",
     "                   [--max-remote-files <n>] [--timeout-ms <n>] [--same-origin-only]",
+    "                   [--cross-origin]",
+    "                   [--concurrency <n>] [--profile]",
     "",
     "Examples:",
     "  analyze-endpoints ./dist",
@@ -63,7 +69,8 @@ function parseArgs(argv: string[]): CliOptions {
     target: null,
     json: false,
     includeUnresolved: false,
-    sameOriginOnly: false,
+    sameOriginOnly: true,
+    profile: false,
     help: false,
   };
 
@@ -92,6 +99,14 @@ function parseArgs(argv: string[]): CliOptions {
     }
     if (arg === "--same-origin-only") {
       options.sameOriginOnly = true;
+      continue;
+    }
+    if (arg === "--cross-origin") {
+      options.sameOriginOnly = false;
+      continue;
+    }
+    if (arg === "--profile") {
+      options.profile = true;
       continue;
     }
     if (arg === "--config") {
@@ -136,6 +151,15 @@ function parseArgs(argv: string[]): CliOptions {
         throw new Error("--timeout-ms requires a number");
       }
       options.timeoutMs = parseNumberArg(value, "--timeout-ms");
+      index += 1;
+      continue;
+    }
+    if (arg === "--concurrency") {
+      const value = argv[index + 1];
+      if (!value) {
+        throw new Error("--concurrency requires a number");
+      }
+      options.concurrency = parseNumberArg(value, "--concurrency");
       index += 1;
       continue;
     }
@@ -187,24 +211,39 @@ async function main() {
           cloneDir: options.cloneDir,
           maxRemoteFiles: options.maxRemoteFiles,
           timeoutMs: options.timeoutMs,
+          concurrency: options.concurrency,
           sameOriginOnly: options.sameOriginOnly,
+          profile: options.profile,
         })
       : await analyzeProject(options.target, {
           sinkDefinitions,
           includeUnresolved: options.includeUnresolved,
+          profile: options.profile,
+          concurrency: options.concurrency,
         });
 
+    const reportStart = nowMs();
+
+    let output = "";
+
     if (options.json) {
-      process.stdout.write(`${toJsonReport(result)}\n`);
-      return;
+      output = toJsonReport(result);
+    } else if (options.exportFormat) {
+      output = toExportReport(result, options.exportFormat);
+    } else {
+      output = toTextReport(result);
     }
 
-    if (options.exportFormat) {
-      process.stdout.write(`${toExportReport(result, options.exportFormat)}\n`);
-      return;
+    const reportMs = elapsedMs(reportStart);
+    if (result.timings) {
+      result.timings.reportMs = reportMs;
     }
 
-    process.stdout.write(`${toTextReport(result)}\n`);
+    process.stdout.write(`${output}\n`);
+
+    if (options.profile) {
+      process.stderr.write(`\n${toProfileReport(result)}\n`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`Error: ${message}\n`);

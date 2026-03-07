@@ -1,131 +1,19 @@
 import type { NodePath } from "@babel/traverse";
 import * as t from "@babel/types";
-import { dedupeTrace, expressionToPath, getStaticPropertyName } from "../utils/ast";
 import { resolveCallExpression, resolveNewExpression } from "./resolveCall";
 import { resolveIdentifier } from "./resolveIdentifier";
 import {
-  arrayValue,
   concatValues,
   dynamicValue,
   functionRefValue,
-  getObjectProperty,
   literalValue,
-  objectValue,
-  unknownValue,
   unionValues,
+  unknownValue,
 } from "./valueModel";
 import type { ResolvedResult, ResolverContext, ResolverState } from "./types";
-
-function nextState(
-  state: ResolverState,
-  overrides: Partial<ResolverState> = {},
-): ResolverState {
-  return {
-    ...state,
-    ...overrides,
-    depth: overrides.depth ?? state.depth + 1,
-  };
-}
-
-function combineTrace(prefix: string, parts: string[][]): string[] {
-  const trace = [prefix];
-  for (const part of parts) {
-    trace.push(...part);
-  }
-  return dedupeTrace(trace);
-}
-
-function resolveObjectExpression(
-  path: NodePath<t.ObjectExpression>,
-  state: ResolverState,
-): ResolvedResult {
-  const properties: Record<string, ReturnType<typeof resolveExpression>["value"]> =
-    {};
-  const traces: string[][] = [];
-
-  for (const propPath of path.get("properties")) {
-    if (propPath.isSpreadElement()) {
-      continue;
-    }
-    if (propPath.isObjectMethod()) {
-      const keyNode = propPath.node.key;
-      let key: string | null = null;
-      if (t.isIdentifier(keyNode) && !propPath.node.computed) {
-        key = keyNode.name;
-      } else if (t.isStringLiteral(keyNode)) {
-        key = keyNode.value;
-      }
-      if (!key) {
-        continue;
-      }
-
-      properties[key] = functionRefValue(propPath.node, `objectMethod:${key}`);
-      traces.push([`ObjectMethod(${key})`]);
-      continue;
-    }
-    if (!propPath.isObjectProperty()) {
-      continue;
-    }
-    const keyNode = propPath.node.key;
-    let key: string | null = null;
-    if (t.isIdentifier(keyNode) && !propPath.node.computed) {
-      key = keyNode.name;
-    } else if (t.isStringLiteral(keyNode)) {
-      key = keyNode.value;
-    }
-    if (!key) {
-      continue;
-    }
-
-    const valuePath = propPath.get("value");
-    if (!valuePath.isExpression()) {
-      continue;
-    }
-    const resolved = resolveExpression(valuePath, nextState(state));
-    properties[key] = resolved.value;
-    traces.push(resolved.trace);
-  }
-
-  return {
-    value: objectValue(properties),
-    trace: combineTrace("ObjectExpression", traces),
-  };
-}
-
-function resolveArrayExpression(
-  path: NodePath<t.ArrayExpression>,
-  state: ResolverState,
-): ResolvedResult {
-  const elements = [];
-  const traces: string[][] = [];
-
-  for (const elementPath of path.get("elements")) {
-    if (!elementPath || !elementPath.isExpression()) {
-      elements.push(unknownValue("array-hole"));
-      continue;
-    }
-    const resolved = resolveExpression(elementPath, nextState(state));
-    elements.push(resolved.value);
-    traces.push(resolved.trace);
-  }
-
-  return {
-    value: arrayValue(elements),
-    trace: combineTrace("ArrayExpression", traces),
-  };
-}
-
-function unwrapTypeExpressions(
-  path: NodePath<t.Expression>,
-): NodePath<t.Expression> {
-  if (path.isTSAsExpression() || path.isTSTypeAssertion() || path.isTSNonNullExpression()) {
-    const nested = path.get("expression") as NodePath<t.Expression>;
-    if (nested.isExpression()) {
-      return unwrapTypeExpressions(nested);
-    }
-  }
-  return path;
-}
+import { resolveArrayExpression, resolveObjectExpression } from "./expression/collections";
+import { resolveMemberExpression } from "./expression/member";
+import { combineTrace, nextState, unwrapTypeExpressions } from "./expression/state";
 
 export function resolveExpression(
   path: NodePath<t.Expression>,
@@ -237,65 +125,15 @@ export function resolveExpression(
   }
 
   if (unwrappedPath.isObjectExpression()) {
-    return resolveObjectExpression(unwrappedPath, state);
+    return resolveObjectExpression(unwrappedPath, state, resolveExpression);
   }
 
   if (unwrappedPath.isArrayExpression()) {
-    return resolveArrayExpression(unwrappedPath, state);
+    return resolveArrayExpression(unwrappedPath, state, resolveExpression);
   }
 
   if (unwrappedPath.isMemberExpression()) {
-    const staticPath = expressionToPath(unwrappedPath.node as t.Expression);
-    if (staticPath) {
-      const assignments = state.context.memberAssignments.get(staticPath);
-      if (assignments && assignments.length > 0) {
-        const resolvedAssignments = assignments.map((assignmentPath) =>
-          resolveExpression(assignmentPath, nextState(state)),
-        );
-        return {
-          value: unionValues(resolvedAssignments.map((entry) => entry.value)),
-          trace: combineTrace(`MemberExpression(${staticPath})`, [
-            ...resolvedAssignments.map((entry) => entry.trace),
-            ["MemberAssignmentAlias"],
-          ]),
-        };
-      }
-    }
-
-    const objectPath = unwrappedPath.get("object") as NodePath<
-      t.Expression | t.Super | t.PrivateName
-    >;
-    if (!objectPath.isExpression()) {
-      return {
-        value: unknownValue("member-object"),
-        trace: ["MemberExpression", "InvalidObject"],
-      };
-    }
-
-    const objectResolved = resolveExpression(
-      objectPath as NodePath<t.Expression>,
-      nextState(state),
-    );
-    const property = getStaticPropertyName(unwrappedPath.node);
-    if (!property) {
-      return {
-        value: unknownValue("computed-member"),
-        trace: ["MemberExpression", ...objectResolved.trace, "Computed"],
-      };
-    }
-
-    const propertyValue = getObjectProperty(objectResolved.value, property);
-    if (!propertyValue) {
-      return {
-        value: unknownValue(`member:${property}`),
-        trace: ["MemberExpression", ...objectResolved.trace, `Property(${property})`],
-      };
-    }
-
-    return {
-      value: propertyValue,
-      trace: ["MemberExpression", ...objectResolved.trace, `Property(${property})`],
-    };
+    return resolveMemberExpression(unwrappedPath, state, resolveExpression);
   }
 
   if (unwrappedPath.isConditionalExpression()) {
