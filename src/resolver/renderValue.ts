@@ -96,6 +96,7 @@ function render(value: ResolvedValue): RenderIntermediate {
     case "array":
     case "functionRef":
     case "callable":
+    case "sinkRef":
     case "axiosInstance":
     case "xhrInstance":
       return {

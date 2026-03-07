@@ -1,6 +1,6 @@
 import type { NodePath } from "@babel/traverse";
 import * as t from "@babel/types";
-import { dedupeTrace, getStaticPropertyName } from "../utils/ast";
+import { dedupeTrace, expressionToPath, getStaticPropertyName } from "../utils/ast";
 import { resolveCallExpression, resolveNewExpression } from "./resolveCall";
 import { resolveIdentifier } from "./resolveIdentifier";
 import {
@@ -168,6 +168,13 @@ export function resolveExpression(
     };
   }
 
+  if (unwrappedPath.isThisExpression()) {
+    return {
+      value: dynamicValue("this"),
+      trace: ["ThisExpression"],
+    };
+  }
+
   if (unwrappedPath.isTemplateLiteral()) {
     const parts = [];
     const traces: string[][] = [];
@@ -238,6 +245,23 @@ export function resolveExpression(
   }
 
   if (unwrappedPath.isMemberExpression()) {
+    const staticPath = expressionToPath(unwrappedPath.node as t.Expression);
+    if (staticPath) {
+      const assignments = state.context.memberAssignments.get(staticPath);
+      if (assignments && assignments.length > 0) {
+        const resolvedAssignments = assignments.map((assignmentPath) =>
+          resolveExpression(assignmentPath, nextState(state)),
+        );
+        return {
+          value: unionValues(resolvedAssignments.map((entry) => entry.value)),
+          trace: combineTrace(`MemberExpression(${staticPath})`, [
+            ...resolvedAssignments.map((entry) => entry.trace),
+            ["MemberAssignmentAlias"],
+          ]),
+        };
+      }
+    }
+
     const objectPath = unwrappedPath.get("object") as NodePath<
       t.Expression | t.Super | t.PrivateName
     >;

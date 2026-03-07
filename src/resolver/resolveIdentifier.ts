@@ -33,6 +33,9 @@ function parameterIndex(
 ): number {
   for (let index = 0; index < functionPath.node.params.length; index += 1) {
     const param = functionPath.node.params[index];
+    if (t.isRestElement(param) && t.isIdentifier(param.argument) && param.argument === identifier) {
+      return index;
+    }
     if (t.isIdentifier(param) && param === identifier) {
       return index;
     }
@@ -322,6 +325,14 @@ export function resolveIdentifier(
 
   const binding = path.scope.getBinding(path.node.name);
   if (!binding) {
+    const globalValue = state.context.globalSymbolValues.get(path.node.name);
+    if (globalValue) {
+      return {
+        value: globalValue,
+        trace: [`Identifier(${path.node.name})`, "GlobalSymbol"],
+      };
+    }
+
     return {
       value: dynamicValue(path.node.name),
       trace: [`Identifier(${path.node.name})`, "UnboundDynamic"],

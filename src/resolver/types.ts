@@ -16,6 +16,8 @@ export interface ResolverContext {
   webpackModulesById: Map<string, WebpackModuleInfo>;
   webpackModuleByFunction: Map<t.Function, WebpackModuleInfo>;
   webpackExternalModulesById: Map<string, Record<string, ResolvedValue>>;
+  globalSymbolValues: Map<string, ResolvedValue>;
+  memberAssignments: Map<string, NodePath<t.Expression>[]>;
   maxDepth: number;
 }
 

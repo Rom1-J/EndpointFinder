@@ -91,6 +91,110 @@ describe("endpoint analyzer", () => {
     expect(finding.url).toBe("https://api.example.com/users");
   });
 
+  it("resolves simple sink alias", () => {
+    const findings = run("const f = fetch; f('/users')");
+    const finding = bySink(findings, "fetch");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves variable alias chains to sink", () => {
+    const findings = run("const a = fetch; const b = a; const c = b; c('/users')");
+    const finding = bySink(findings, "fetch");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves object property alias", () => {
+    const findings = run("const api = { req: fetch }; api.req('/users')");
+    const finding = bySink(findings, "fetch");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves pass-through wrapper with rest args", () => {
+    const findings = run("function req(...args){ return fetch(...args); } req('/users')");
+    const finding = bySink(findings, "fetch");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves parameter alias forwarding", () => {
+    const findings = run("function use(r){ return r('/users'); } use(fetch)");
+    const finding = bySink(findings, "fetch");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves higher-order forwarding wrapper", () => {
+    const findings = run(
+      "function wrap(fn){ return (url) => fn(url); } const f = wrap(fetch); f('/users')",
+    );
+    const finding = bySink(findings, "fetch");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves returned wrapper function", () => {
+    const findings = run(
+      "function makeRequester(){ return (url) => fetch(url); } const req = makeRequester(); req('/users')",
+    );
+    const finding = bySink(findings, "fetch");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves axios method alias", () => {
+    const findings = run("const g = axios.get; g('/users')");
+    const finding = bySink(findings, "axios.get");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves bound axios method alias", () => {
+    const findings = run("const g = axios.get.bind(axios); g('/users')");
+    const finding = bySink(findings, "axios.get");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves extracted axios method from axios instance", () => {
+    const findings = run(
+      "const client = axios.create({ baseURL: 'https://x.test' }); const get = client.get; get('/users')",
+    );
+    const finding = bySink(findings, "axios.get");
+    expect(finding.url).toBe("https://x.test/users");
+  });
+
+  it("resolves destructured axios method alias", () => {
+    const findings = run("const { get } = axios; get('/users')");
+    const finding = bySink(findings, "axios.get");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves destructured axios instance method alias", () => {
+    const findings = run(
+      "const client = axios.create({ baseURL: 'https://x.test' }); const { get } = client; get('/users')",
+    );
+    const finding = bySink(findings, "axios.get");
+    expect(finding.url).toBe("https://x.test/users");
+  });
+
+  it("resolves this-bound property alias in class", () => {
+    const findings = run(
+      "class A { constructor(){ this.http = fetch; } run(){ return this.http('/users'); } } new A().run();",
+    );
+    const finding = bySink(findings, "fetch");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves nested property assignment alias", () => {
+    const findings = run(
+      "const x = {}; x.net = {}; x.net.req = fetch; x.net.req('/users')",
+    );
+    const finding = bySink(findings, "fetch");
+    expect(finding.url).toBe("/users");
+  });
+
+  it("resolves wrapper factory with captured base", () => {
+    const findings = run(
+      "function mk(base){ return (path) => fetch(base + path); } const r = mk('https://x.test'); r('/users')",
+    );
+    const finding = bySink(findings, "fetch");
+    expect(finding.url).toBe("https://x.test/users");
+  });
+
   it("extracts fetch headers and body metadata", () => {
     const findings = run(
       "fetch('https://x.test/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({u:1}) })",
@@ -216,6 +320,25 @@ describe("endpoint analyzer", () => {
     const finding = bySink(findings, "apiClient.get");
     expect(finding.url).toBe("https://custom.test/x");
     expect(finding.method).toBe("GET");
+  });
+
+  it("supports configurable custom sink method alias", () => {
+    const customSinks: SinkDefinition[] = [
+      {
+        name: "apiClient.get",
+        type: "method",
+        match: "apiClient.get",
+        urlArg: 0,
+        httpMethod: "GET",
+      },
+    ];
+
+    const findings = run(
+      "const r = apiClient.get; r('/users')",
+      mergeSinkDefinitions(customSinks),
+    );
+    const finding = bySink(findings, "apiClient.get");
+    expect(finding.url).toBe("/users");
   });
 
   it("supports custom sink baseURLArg semantics", () => {

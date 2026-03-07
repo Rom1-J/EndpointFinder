@@ -10,8 +10,11 @@ export type ResolvedValue =
   | ArrayValue
   | FunctionRefValue
   | CallableValue
+  | SinkRefValue
   | AxiosInstanceValue
   | XhrInstanceValue;
+
+export type SinkRefType = "call" | "method" | "constructor";
 
 export interface LiteralValue {
   kind: "literal";
@@ -58,6 +61,17 @@ export interface CallableValue {
   kind: "callable";
   returnValue: ResolvedValue;
   label: string;
+}
+
+export interface SinkRefValue {
+  kind: "sinkRef";
+  sinkName: string;
+  match: string;
+  sinkType: SinkRefType;
+  urlArg: number;
+  methodArg?: number;
+  httpMethod?: string;
+  baseURL?: ResolvedValue | null;
 }
 
 export interface AxiosInstanceValue {
@@ -113,6 +127,27 @@ export function callableValue(
   };
 }
 
+export function sinkRefValue(definition: {
+  sinkName: string;
+  match: string;
+  sinkType: SinkRefType;
+  urlArg: number;
+  methodArg?: number;
+  httpMethod?: string;
+  baseURL?: ResolvedValue | null;
+}): SinkRefValue {
+  return {
+    kind: "sinkRef",
+    sinkName: definition.sinkName,
+    match: definition.match,
+    sinkType: definition.sinkType,
+    urlArg: definition.urlArg,
+    methodArg: definition.methodArg,
+    httpMethod: definition.httpMethod,
+    baseURL: definition.baseURL,
+  };
+}
+
 export function axiosInstanceValue(baseURL: ResolvedValue): AxiosInstanceValue {
   return { kind: "axiosInstance", baseURL };
 }
@@ -146,6 +181,10 @@ function valueKey(value: ResolvedValue): string {
     }
     case "callable":
       return `callable:${value.label}:${valueKey(value.returnValue)}`;
+    case "sinkRef":
+      return `sinkRef:${value.match}:${value.sinkType}:${value.urlArg}:${
+        value.methodArg ?? "none"
+      }:${value.httpMethod ?? "none"}:${value.baseURL ? valueKey(value.baseURL) : "none"}`;
     case "axiosInstance":
       return `axios:${valueKey(value.baseURL)}`;
     case "xhrInstance":
@@ -228,6 +267,27 @@ export function getObjectProperty(
     return value.properties[propertyName];
   }
 
+  if (value.kind === "axiosInstance") {
+    const method = propertyName.toLowerCase();
+    const httpMethods: Record<string, string> = {
+      get: "GET",
+      post: "POST",
+      put: "PUT",
+      patch: "PATCH",
+      delete: "DELETE",
+    };
+    if (httpMethods[method]) {
+      return sinkRefValue({
+        sinkName: `axios.${method}`,
+        match: `axios.${method}`,
+        sinkType: "method",
+        urlArg: 0,
+        httpMethod: httpMethods[method],
+        baseURL: value.baseURL,
+      });
+    }
+  }
+
   if (value.kind === "union") {
     const matches = value.options
       .map((option) => getObjectProperty(option, propertyName))
@@ -239,6 +299,10 @@ export function getObjectProperty(
   }
 
   return undefined;
+}
+
+export function isSinkRefValue(value: ResolvedValue): value is SinkRefValue {
+  return value.kind === "sinkRef";
 }
 
 const ABSOLUTE_URL = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//;

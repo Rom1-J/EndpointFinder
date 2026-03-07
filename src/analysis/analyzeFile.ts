@@ -15,12 +15,18 @@ import type {
   WebpackModuleInfo,
 } from "../resolver/types";
 import {
+  objectValue,
+  sinkRefValue,
   getObjectProperty,
   joinBaseAndPath,
+  isSinkRefValue,
+  unionValues,
+  unknownValue,
   type ResolvedValue,
+  type SinkRefValue,
 } from "../resolver/valueModel";
 import { builtinSinks } from "../sinks/builtinSinks";
-import { matchSink, type SinkMatch } from "../sinks/matchSink";
+import { matchSink } from "../sinks/matchSink";
 import type { SinkDefinition } from "../sinks/sinkConfig";
 import type {
   AnalyzeFileResult,
@@ -28,7 +34,11 @@ import type {
   FindingBody,
   FindingHeader,
 } from "../types";
-import { dedupeTrace, normalizeFilePath } from "../utils/ast";
+import {
+  dedupeTrace,
+  expressionToPath,
+  normalizeFilePath,
+} from "../utils/ast";
 
 export interface AnalyzeSourceOptions {
   sinkDefinitions?: SinkDefinition[];
@@ -247,10 +257,40 @@ function collectResolverIndexes(ast: t.File) {
   const functionPaths = new Map<t.Function, NodePath<t.Function>>();
   const webpackModulesById = new Map<string, WebpackModuleInfo>();
   const webpackModuleByFunction = new Map<t.Function, WebpackModuleInfo>();
+  const memberAssignments = new Map<string, NodePath<t.Expression>[]>();
+
+  const addMemberAssignment = (key: string, valuePath: NodePath<t.Expression>) => {
+    const existing = memberAssignments.get(key);
+    if (existing) {
+      existing.push(valuePath);
+    } else {
+      memberAssignments.set(key, [valuePath]);
+    }
+  };
 
   traverse(ast, {
     Function(path) {
       functionPaths.set(path.node, path as NodePath<t.Function>);
+    },
+    AssignmentExpression(path) {
+      if (path.node.operator !== "=") {
+        return;
+      }
+      const leftPath = path.get("left");
+      if (!leftPath.isMemberExpression()) {
+        return;
+      }
+      const staticPath = expressionToPath(leftPath.node as t.Expression);
+      if (!staticPath) {
+        return;
+      }
+
+      const rightPath = path.get("right");
+      if (!rightPath.isExpression()) {
+        return;
+      }
+
+      addMemberAssignment(staticPath, rightPath as NodePath<t.Expression>);
     },
     CallExpression(path) {
       const functionPath = getFunctionPathFromCallee(
@@ -313,7 +353,291 @@ function collectResolverIndexes(ast: t.File) {
     functionPaths,
     webpackModulesById,
     webpackModuleByFunction,
+    memberAssignments,
   };
+}
+
+function sinkRefFromDefinition(
+  definition: SinkDefinition,
+  baseURL: ResolvedValue | null = null,
+): SinkRefValue {
+  return sinkRefValue({
+    sinkName: definition.name,
+    match: definition.match,
+    sinkType: definition.type,
+    urlArg: definition.urlArg,
+    methodArg: definition.methodArg,
+    httpMethod: definition.httpMethod,
+    baseURL,
+  });
+}
+
+function mergeGlobalSymbolValue(
+  symbolMap: Map<string, ResolvedValue>,
+  key: string,
+  value: ResolvedValue,
+) {
+  const existing = symbolMap.get(key);
+  if (!existing) {
+    symbolMap.set(key, value);
+    return;
+  }
+  symbolMap.set(key, unionValues([existing, value]));
+}
+
+function ensureObjectValue(value: ResolvedValue | undefined): {
+  kind: "object";
+  properties: Record<string, ResolvedValue>;
+} {
+  if (value?.kind === "object") {
+    return value;
+  }
+  return objectValue({});
+}
+
+function addMethodSinkToGlobal(
+  symbolMap: Map<string, ResolvedValue>,
+  definition: SinkDefinition,
+) {
+  const parts = definition.match.split(".");
+  if (parts.length < 2) {
+    return;
+  }
+
+  // Instance-only sink, not a global static property.
+  if (definition.match === "XMLHttpRequest.open") {
+    return;
+  }
+
+  const root = parts[0];
+  let rootValue = ensureObjectValue(symbolMap.get(root));
+  mergeGlobalSymbolValue(symbolMap, root, rootValue);
+
+  let current = rootValue;
+  for (let index = 1; index < parts.length; index += 1) {
+    const part = parts[index];
+    const isLeaf = index === parts.length - 1;
+
+    if (isLeaf) {
+      const sinkValue = sinkRefFromDefinition(definition);
+      const existing = current.properties[part];
+      current.properties[part] = existing
+        ? unionValues([existing, sinkValue])
+        : sinkValue;
+      return;
+    }
+
+    const existing = current.properties[part];
+    const nextObject = ensureObjectValue(existing);
+    current.properties[part] = existing
+      ? unionValues([existing, nextObject])
+      : nextObject;
+    current = nextObject;
+  }
+}
+
+function buildGlobalSymbolValues(
+  sinkDefinitions: SinkDefinition[],
+): Map<string, ResolvedValue> {
+  const symbols = new Map<string, ResolvedValue>();
+
+  for (const definition of sinkDefinitions) {
+    if (definition.type === "call" || definition.type === "constructor") {
+      const rootParts = definition.match.split(".");
+      if (rootParts.length === 1) {
+        mergeGlobalSymbolValue(symbols, definition.match, sinkRefFromDefinition(definition));
+      }
+    }
+
+    if (definition.type === "method") {
+      addMethodSinkToGlobal(symbols, definition);
+    }
+  }
+
+  return symbols;
+}
+
+function collectFunctionRefs(
+  value: ResolvedValue,
+  output: Set<t.Function>,
+): void {
+  if (value.kind === "functionRef") {
+    output.add(value.functionNode);
+    return;
+  }
+  if (value.kind === "callable") {
+    collectFunctionRefs(value.returnValue, output);
+    return;
+  }
+  if (value.kind === "union") {
+    value.options.forEach((option) => collectFunctionRefs(option, output));
+  }
+}
+
+function addCallSiteIfMissing(
+  callSitesByFunction: Map<t.Function, NodePath<t.CallExpression>[]>,
+  functionNode: t.Function,
+  callSite: NodePath<t.CallExpression>,
+): boolean {
+  const list = callSitesByFunction.get(functionNode);
+  if (!list) {
+    callSitesByFunction.set(functionNode, [callSite]);
+    return true;
+  }
+
+  if (list.some((existing) => existing.node === callSite.node)) {
+    return false;
+  }
+
+  list.push(callSite);
+  return true;
+}
+
+function augmentIndirectCallSites(ast: t.File, context: ResolverContext): void {
+  const maxPasses = 3;
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    let changed = false;
+
+    traverse(ast, {
+      CallExpression(path) {
+        const directFunctionPath = getFunctionPathFromCallee(
+          path.get("callee") as NodePath<t.Expression | t.V8IntrinsicIdentifier | t.Super>,
+        );
+        if (directFunctionPath) {
+          return;
+        }
+
+        const calleePath = path.get("callee");
+        if (!calleePath.isExpression()) {
+          return;
+        }
+
+        const resolved = resolveWithState(calleePath as NodePath<t.Expression>, context);
+        const functionRefs = new Set<t.Function>();
+        collectFunctionRefs(resolved.value, functionRefs);
+
+        for (const functionRef of functionRefs) {
+          changed =
+            addCallSiteIfMissing(context.callSitesByFunction, functionRef, path) ||
+            changed;
+        }
+      },
+    });
+
+    if (!changed) {
+      break;
+    }
+  }
+}
+
+function toSinkDefinition(ref: SinkRefValue): SinkDefinition {
+  return {
+    name: ref.sinkName,
+    type: ref.sinkType,
+    match: ref.match,
+    urlArg: ref.urlArg,
+    methodArg: ref.methodArg,
+    httpMethod: ref.httpMethod,
+  };
+}
+
+function collectSinkRefs(value: ResolvedValue): SinkRefValue[] {
+  if (isSinkRefValue(value)) {
+    return [value];
+  }
+  if (value.kind === "union") {
+    const seen = new Map<string, SinkRefValue>();
+    for (const option of value.options) {
+      for (const sinkRef of collectSinkRefs(option)) {
+        const key = `${sinkRef.match}:${sinkRef.sinkType}:${sinkRef.urlArg}:${
+          sinkRef.methodArg ?? "none"
+        }:${sinkRef.httpMethod ?? "none"}`;
+        if (!seen.has(key)) {
+          seen.set(key, sinkRef);
+        }
+      }
+    }
+    return [...seen.values()];
+  }
+  return [];
+}
+
+function resolveSpreadArgumentValue(value: ResolvedValue): ResolvedValue {
+  if (value.kind === "array") {
+    return value.elements[0] ?? value;
+  }
+  if (value.kind === "union") {
+    return unionValues(value.options.map((option) => resolveSpreadArgumentValue(option)));
+  }
+  return value;
+}
+
+function resolveCallArgumentByIndex(
+  sinkPath: NodePath<t.CallExpression> | NodePath<t.NewExpression>,
+  index: number,
+  resolve: (path: NodePath<t.Expression>) => ReturnType<typeof resolveExpression>,
+): ReturnType<typeof resolveExpression> | null {
+  const args = sinkPath.get("arguments") as NodePath<t.Expression | t.SpreadElement>[];
+  const argPath = args[index];
+  if (!argPath) {
+    return null;
+  }
+
+  if (argPath.isExpression()) {
+    return resolve(argPath as NodePath<t.Expression>);
+  }
+
+  if (argPath.isSpreadElement()) {
+    const spreadArg = argPath.get("argument");
+    if (!spreadArg.isExpression()) {
+      return {
+        value: unknownValue("spread-argument"),
+        trace: ["SpreadArgument", "NoExpression"],
+      };
+    }
+    const spreadResolved = resolve(spreadArg as NodePath<t.Expression>);
+    return {
+      value: resolveSpreadArgumentValue(spreadResolved.value),
+      trace: ["SpreadArgument", ...spreadResolved.trace],
+    };
+  }
+
+  return null;
+}
+
+interface ResolvedSinkTarget {
+  definition: SinkDefinition;
+  baseURL: ResolvedValue | null;
+  indirectTrace: string[];
+}
+
+function resolveIndirectSinkTargets(
+  sinkPath: NodePath<t.CallExpression> | NodePath<t.NewExpression>,
+  resolve: (path: NodePath<t.Expression>) => ReturnType<typeof resolveExpression>,
+): ResolvedSinkTarget[] {
+  const calleePath = sinkPath.get("callee") as NodePath<
+    t.Expression | t.V8IntrinsicIdentifier | t.Super
+  >;
+  if (!calleePath.isExpression()) {
+    return [];
+  }
+
+  const resolvedCallee = resolve(calleePath as NodePath<t.Expression>);
+  const sinkRefs = collectSinkRefs(resolvedCallee.value).filter((sinkRef) =>
+    sinkPath.isNewExpression()
+      ? sinkRef.sinkType === "constructor"
+      : sinkRef.sinkType !== "constructor",
+  );
+  if (sinkRefs.length === 0) {
+    return [];
+  }
+
+  return sinkRefs.map((sinkRef) => ({
+    definition: toSinkDefinition(sinkRef),
+    baseURL: sinkRef.baseURL ?? null,
+    indirectTrace: [...resolvedCallee.trace, `IndirectSink(${sinkRef.match})`],
+  }));
 }
 
 function resolveAxiosCall(
@@ -490,6 +814,12 @@ function renderGenericValue(
       };
     case "callable":
       return renderGenericValue(value.returnValue, mode);
+    case "sinkRef":
+      return {
+        text: `${value.match}()`,
+        hasUnknown: false,
+        hasDynamic: true,
+      };
     case "axiosInstance":
       return {
         text: "${axiosInstance}",
@@ -908,7 +1238,7 @@ function mergeHeaders(
 
 function extractRequestMetadata(
   sinkPath: NodePath<t.CallExpression> | NodePath<t.NewExpression>,
-  sinkMatch: SinkMatch,
+  sinkDefinition: SinkDefinition,
   resolve: (path: NodePath<t.Expression>) => ReturnType<typeof resolveExpression>,
 ): {
   headers: FindingHeader[];
@@ -917,7 +1247,7 @@ function extractRequestMetadata(
   let headers: FindingHeader[] = [];
   let body: FindingBody | null = null;
 
-  const matchName = sinkMatch.definition.match;
+  const matchName = sinkDefinition.match;
 
   if (
     (matchName === "fetch" && sinkPath.isCallExpression()) ||
@@ -981,7 +1311,7 @@ function extractRequestMetadata(
   if (headers.length === 0 && body === null && sinkPath.isCallExpression()) {
     const fallbackConfig = resolveArg(
       sinkPath,
-      sinkMatch.definition.urlArg + 1,
+      sinkDefinition.urlArg + 1,
       resolve,
     );
     const fallbackMetadata = requestMetadataFromConfig(
@@ -1150,6 +1480,7 @@ function analyzeAst(
   const includeUnresolved = options.includeUnresolved ?? false;
 
   const indexes = collectResolverIndexes(ast);
+  const globalSymbolValues = buildGlobalSymbolValues(sinkDefinitions);
   const resolverContext: ResolverContext = {
     callSitesByFunction: indexes.callSitesByFunction,
     functionPaths: indexes.functionPaths,
@@ -1157,8 +1488,13 @@ function analyzeAst(
     webpackModuleByFunction: indexes.webpackModuleByFunction,
     webpackExternalModulesById:
       options.webpackExternalModulesById ?? new Map<string, Record<string, ResolvedValue>>(),
+    globalSymbolValues,
+    memberAssignments: indexes.memberAssignments,
     maxDepth: options.maxDepth ?? 12,
   };
+
+  augmentIndirectCallSites(ast, resolverContext);
+
   const resolve = (path: NodePath<t.Expression>) =>
     resolveWithState(path, resolverContext);
   const prettySourceName = normalizeFilePath(filePath);
@@ -1192,105 +1528,137 @@ function analyzeAst(
       sinkDefinitions,
       resolveExpression: resolve,
     });
-    if (!matched) {
+    const targets: ResolvedSinkTarget[] = [];
+
+    if (matched) {
+      targets.push({
+        definition: matched.definition,
+        baseURL: matched.baseURL,
+        indirectTrace: [],
+      });
+    } else {
+      targets.push(...resolveIndirectSinkTargets(path, resolve));
+    }
+
+    if (targets.length === 0) {
       return;
     }
 
-    let urlValue: ResolvedValue | null = null;
-    let method: string | null = matched.definition.httpMethod ?? null;
-    const trace: string[] = [];
+    for (const target of targets) {
+      let urlValue: ResolvedValue | null = null;
+      let method: string | null = target.definition.httpMethod ?? null;
+      const trace: string[] = [...target.indirectTrace];
 
-    if (matched.definition.match === "axios" && path.isCallExpression()) {
-      const axiosResolved = resolveAxiosCall(path, resolve);
-      urlValue = axiosResolved.urlValue;
-      method = method ?? axiosResolved.method;
-      trace.push(...axiosResolved.trace);
-    } else if (matched.urlArgPath) {
-      const urlResolved = resolve(matched.urlArgPath);
-      urlValue = urlResolved.value;
-      trace.push(...urlResolved.trace);
-    }
-
-    if (matched.baseURL && urlValue) {
-      urlValue = joinBaseAndPath(matched.baseURL, urlValue);
-      trace.push("Join(baseURL,path)");
-    }
-
-    if (!matched.baseURL && matched.baseURLArgPath && urlValue) {
-      const baseArgResolved = resolve(matched.baseURLArgPath);
-      urlValue = joinBaseAndPath(baseArgResolved.value, urlValue);
-      trace.push(...baseArgResolved.trace);
-      trace.push("Join(baseURLArg,path)");
-    }
-
-    if (
-      !matched.baseURL &&
-      matched.definition.match.startsWith("axios.") &&
-      path.isCallExpression() &&
-      urlValue
-    ) {
-      const inlineBaseURL = resolveAxiosMethodBaseURL(path, resolve);
-      if (inlineBaseURL) {
-        urlValue = joinBaseAndPath(inlineBaseURL, urlValue);
-        trace.push("Join(axiosMethodConfig.baseURL,path)");
+      if (target.definition.match === "axios" && path.isCallExpression()) {
+        const axiosResolved = resolveAxiosCall(path, resolve);
+        urlValue = axiosResolved.urlValue;
+        method = method ?? axiosResolved.method;
+        trace.push(...axiosResolved.trace);
+      } else {
+        const urlResolved = resolveCallArgumentByIndex(path, target.definition.urlArg, resolve);
+        if (urlResolved) {
+          urlValue = urlResolved.value;
+          trace.push(...urlResolved.trace);
+        }
       }
+
+      if (target.baseURL && urlValue) {
+        urlValue = joinBaseAndPath(target.baseURL, urlValue);
+        trace.push("Join(baseURL,path)");
+      }
+
+      if (
+        !target.baseURL &&
+        typeof target.definition.baseURLArg === "number" &&
+        urlValue
+      ) {
+        const baseArgResolved = resolveCallArgumentByIndex(
+          path,
+          target.definition.baseURLArg,
+          resolve,
+        );
+        if (baseArgResolved) {
+          urlValue = joinBaseAndPath(baseArgResolved.value, urlValue);
+          trace.push(...baseArgResolved.trace);
+          trace.push("Join(baseURLArg,path)");
+        }
+      }
+
+      if (
+        !target.baseURL &&
+        target.definition.match.startsWith("axios.") &&
+        path.isCallExpression() &&
+        urlValue
+      ) {
+        const inlineBaseURL = resolveAxiosMethodBaseURL(path, resolve);
+        if (inlineBaseURL) {
+          urlValue = joinBaseAndPath(inlineBaseURL, urlValue);
+          trace.push("Join(axiosMethodConfig.baseURL,path)");
+        }
+      }
+
+      if (!method && typeof target.definition.methodArg === "number") {
+        const methodResolved = resolveCallArgumentByIndex(
+          path,
+          target.definition.methodArg,
+          resolve,
+        );
+        if (methodResolved) {
+          method = toHttpMethod(methodResolved.value);
+          trace.push(...methodResolved.trace);
+        }
+      }
+
+      if (!method && target.definition.match === "fetch" && path.isCallExpression()) {
+        method = resolveFetchLikeMethod(path, resolve) ?? "GET";
+      }
+
+      if (!method && target.definition.match === "Request" && path.isNewExpression()) {
+        method = resolveFetchLikeMethod(path, resolve) ?? "GET";
+      }
+
+      const requestMetadata = extractRequestMetadata(path, target.definition, resolve);
+
+      const rendered = urlValue ? renderValue(urlValue) : null;
+      if (!rendered && !includeUnresolved) {
+        continue;
+      }
+
+      if (
+        rendered &&
+        !includeUnresolved &&
+        rendered.url === null &&
+        rendered.urlTemplate === null
+      ) {
+        continue;
+      }
+
+      const location = path.node.loc?.start;
+      const line = location?.line ?? 1;
+      const column = (location?.column ?? 0) + 1;
+      const finding: Finding = {
+        file: normalizeFilePath(filePath),
+        line,
+        column,
+        sink: target.definition.name,
+        method,
+        url: rendered?.url ?? null,
+        urlTemplate: rendered?.urlTemplate ?? null,
+        confidence: rendered?.confidence ?? "low",
+        resolutionTrace: dedupeTrace([...trace, `Sink(${target.definition.name})`]),
+        codeSnippet: buildCodeSnippet(
+          prettySource,
+          prettyLines,
+          prettyTraceMap,
+          prettySourceName,
+          path,
+        ),
+        headers: requestMetadata.headers.length > 0 ? requestMetadata.headers : undefined,
+        body: requestMetadata.body,
+      };
+
+      findings.push(finding);
     }
-
-    if (!method && matched.methodArgPath) {
-      const methodResolved = resolve(matched.methodArgPath);
-      method = toHttpMethod(methodResolved.value);
-      trace.push(...methodResolved.trace);
-    }
-
-    if (!method && matched.definition.match === "fetch" && path.isCallExpression()) {
-      method = resolveFetchLikeMethod(path, resolve) ?? "GET";
-    }
-
-    if (!method && matched.definition.match === "Request" && path.isNewExpression()) {
-      method = resolveFetchLikeMethod(path, resolve) ?? "GET";
-    }
-
-    const requestMetadata = extractRequestMetadata(path, matched, resolve);
-
-    const rendered = urlValue ? renderValue(urlValue) : null;
-    if (!rendered && !includeUnresolved) {
-      return;
-    }
-
-    if (
-      rendered &&
-      !includeUnresolved &&
-      rendered.url === null &&
-      rendered.urlTemplate === null
-    ) {
-      return;
-    }
-
-    const location = path.node.loc?.start;
-    const line = location?.line ?? 1;
-    const column = (location?.column ?? 0) + 1;
-    const finding: Finding = {
-      file: normalizeFilePath(filePath),
-      line,
-      column,
-      sink: matched.definition.name,
-      method,
-      url: rendered?.url ?? null,
-      urlTemplate: rendered?.urlTemplate ?? null,
-      confidence: rendered?.confidence ?? "low",
-      resolutionTrace: dedupeTrace([...trace, `Sink(${matched.definition.name})`]),
-      codeSnippet: buildCodeSnippet(
-        prettySource,
-        prettyLines,
-        prettyTraceMap,
-        prettySourceName,
-        path,
-      ),
-      headers: requestMetadata.headers.length > 0 ? requestMetadata.headers : undefined,
-      body: requestMetadata.body,
-    };
-
-    findings.push(finding);
   };
 
   traverse(ast, {

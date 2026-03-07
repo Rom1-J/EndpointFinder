@@ -57,6 +57,10 @@ function getParamBindingIdentifier(
   functionPath: NodePath<t.Function>,
   param: t.Function["params"][number],
 ): t.Identifier | null {
+  if (t.isRestElement(param) && t.isIdentifier(param.argument)) {
+    const binding = functionPath.scope.getBinding(param.argument.name);
+    return binding?.identifier ?? param.argument;
+  }
   if (t.isIdentifier(param)) {
     const binding = functionPath.scope.getBinding(param.name);
     return binding?.identifier ?? param;
@@ -301,6 +305,27 @@ function resolveKnownMemberCall(
       value: objectResolved.value,
       trace: ["CallExpression(.toString)", ...objectResolved.trace],
     };
+  }
+
+  if (method === "bind") {
+    if (objectResolved.value.kind === "sinkRef") {
+      return {
+        value: objectResolved.value,
+        trace: ["CallExpression(.bind)", ...objectResolved.trace, "BindSinkAlias"],
+      };
+    }
+    if (objectResolved.value.kind === "callable") {
+      return {
+        value: objectResolved.value,
+        trace: ["CallExpression(.bind)", ...objectResolved.trace, "BindCallable"],
+      };
+    }
+    if (objectResolved.value.kind === "functionRef") {
+      return {
+        value: objectResolved.value,
+        trace: ["CallExpression(.bind)", ...objectResolved.trace, "BindFunctionRef"],
+      };
+    }
   }
 
   if (method === "join") {

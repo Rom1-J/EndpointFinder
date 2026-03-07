@@ -32,6 +32,12 @@ It is **not** a regex URL grep. It parses source into an AST and performs sink d
   - resolves local webpack module exports (`n(1234)` patterns)
   - project-wide cross-file webpack export registry for chunk-to-chunk resolution
 - Performs shallow interprocedural parameter resolution via call sites
+- Resolves shallow sink references and aliases:
+  - variable alias chains (`const a = fetch; const b = a; b("/users")`)
+  - object/member aliases (`api.req = fetch`, `this.http = fetch`, `x.net.req = fetch`)
+  - pass-through wrappers and higher-order forwarding (`(...args) => fetch(...args)`, `wrap(fetch)`)
+  - extracted/bound/destructured methods (`const get = axios.get`, `.bind(...)`, `const { get } = client`)
+  - custom configured sink aliases (`const r = apiClient.get; r("/users")`)
 - Emits findings with source location, confidence, and resolution trace
 - Continues analysis even if some files fail to parse
 
@@ -175,6 +181,26 @@ Optional fields:
 - `baseURLArg`: index of argument carrying a base URL to join with `urlArg`
 - `httpMethod`: fixed method when known
 
+### Alias-Aware Sink Resolution
+
+The analyzer can follow shallow sink references, so indirect calls are detected in practical patterns:
+
+```js
+const f = fetch;
+f("/users");
+
+function use(requestFn) {
+  return requestFn("/users");
+}
+use(fetch);
+
+const client = axios.create({ baseURL: "https://api.example.com" });
+const get = client.get.bind(client);
+get("/users");
+```
+
+This is intentionally shallow and pragmatic: it targets common reverse-engineering patterns without attempting full program-wide symbolic execution.
+
 ## Output
 
 Each finding includes:
@@ -208,19 +234,15 @@ bun run test
 
 Current suite covers:
 
-1. Direct fetch literal
-2. Fetch with const + concatenation
-3. Fetch with template literals
-4. `XMLHttpRequest.open`
-5. Axios direct call
-6. Axios instance with `baseURL`
-7. WebSocket constructor
-8. Simple wrapper function
-9. One-level parameter propagation
-10. Object property-based base URL
-11. Minified-style sample
-12. Partially unresolved dynamic segment
-13. Custom configured sink
+1. Direct sink detection (`fetch`, `Request`, `XMLHttpRequest.open`, `WebSocket`, Axios variants)
+2. URL expression resolution (literal/template/concat/transpiled concat/destructuring)
+3. Axios `baseURL` joins (instance `baseURL`, inline method config `baseURL`, custom `baseURLArg`)
+4. Wrapper and interprocedural propagation (including rest-arg pass-through wrappers)
+5. Alias-aware sink resolution (variable chains, object/member aliases, class `this` aliases)
+6. Method extraction/forwarding (`axios.get` aliasing, `.bind`, destructured methods)
+7. Webpack-style module export resolution for endpoint bases
+8. Request metadata extraction (headers/body, `JSON.stringify`, `FormData` fields)
+9. Configurable custom sinks, including indirect/custom sink method aliases
 
 ## Notes and Limits (MVP)
 
