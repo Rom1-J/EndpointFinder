@@ -203,6 +203,29 @@ export function collectResolverIndexes(ast: t.File): ResolverIndexes {
     Function(path) {
       functionPaths.set(path.node, path as NodePath<t.Function>);
     },
+    ClassProperty(path) {
+      if (path.node.static) {
+        return;
+      }
+
+      const keyNode = path.node.key;
+      const propertyName =
+        t.isIdentifier(keyNode) && !path.node.computed
+          ? keyNode.name
+          : t.isStringLiteral(keyNode)
+            ? keyNode.value
+            : null;
+      if (!propertyName) {
+        return;
+      }
+
+      const valuePath = path.get("value");
+      if (!valuePath || !valuePath.isExpression()) {
+        return;
+      }
+
+      addMemberAssignment(`this.${propertyName}`, valuePath as NodePath<t.Expression>);
+    },
     AssignmentExpression(path) {
       if (path.node.operator !== "=") {
         return;

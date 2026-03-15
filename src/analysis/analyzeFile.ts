@@ -13,6 +13,7 @@ import type { AnalyzeFileResult, FileAnalysisTiming, Finding } from "../types";
 import { dedupeTrace, normalizeFilePath } from "../utils/ast";
 import { elapsedMs, nowMs } from "../utils/perf";
 import { resolveAxiosCall, resolveAxiosMethodBaseURL, resolveFetchLikeMethod, toHttpMethod } from "./file/methodResolution";
+import { detectMemberHttpSinkCandidate } from "./file/memberHttpSink";
 import { extractRequestMetadata } from "./file/requestMetadata";
 import { collectResolverIndexes } from "./file/resolverIndexes";
 import { buildCodeSnippet } from "./file/snippet";
@@ -25,6 +26,13 @@ import {
   resolveIndirectSinkTargets,
   type ResolvedSinkTarget,
 } from "./file/sinkTargets";
+
+interface AnalysisSinkTarget extends ResolvedSinkTarget {
+  urlResolved?: ReturnType<typeof resolveCallArgumentByIndex>;
+  methodOverride?: string | null;
+  confidenceOverride?: Finding["confidence"];
+  detectionReason?: string[];
+}
 
 export interface AnalyzeSourceOptions {
   sinkDefinitions?: SinkDefinition[];
@@ -129,7 +137,7 @@ function analyzeAst(
       sinkDefinitions,
       resolveExpression: resolve,
     });
-    const targets: ResolvedSinkTarget[] = [];
+    const targets: AnalysisSinkTarget[] = [];
 
     if (matched) {
       targets.push({
@@ -141,16 +149,38 @@ function analyzeAst(
       targets.push(...resolveIndirectSinkTargets(path, resolve));
     }
 
+    if (targets.length === 0 && path.isCallExpression()) {
+      const memberHttpCandidate = detectMemberHttpSinkCandidate(
+        path,
+        resolve,
+        resolverContext,
+      );
+      if (memberHttpCandidate) {
+        targets.push({
+          definition: memberHttpCandidate.definition,
+          baseURL: null,
+          indirectTrace: memberHttpCandidate.trace,
+          urlResolved: memberHttpCandidate.urlResult,
+          methodOverride: memberHttpCandidate.method,
+          confidenceOverride: memberHttpCandidate.confidence,
+          detectionReason: memberHttpCandidate.detectionReason,
+        });
+      }
+    }
+
     if (targets.length === 0) {
       return;
     }
 
     for (const target of targets) {
       let urlValue: ResolvedValue | null = null;
-      let method: string | null = target.definition.httpMethod ?? null;
+      let method: string | null = target.methodOverride ?? target.definition.httpMethod ?? null;
       const trace: string[] = [...target.indirectTrace];
 
-      if (target.definition.match === "axios" && path.isCallExpression()) {
+      if (target.urlResolved) {
+        urlValue = target.urlResolved.value;
+        trace.push(...target.urlResolved.trace);
+      } else if (target.definition.match === "axios" && path.isCallExpression()) {
         const axiosResolved = resolveAxiosCall(path, resolve);
         urlValue = axiosResolved.urlValue;
         method = method ?? axiosResolved.method;
@@ -246,7 +276,7 @@ function analyzeAst(
         method,
         url: rendered?.url ?? null,
         urlTemplate: rendered?.urlTemplate ?? null,
-        confidence: rendered?.confidence ?? "low",
+        confidence: target.confidenceOverride ?? rendered?.confidence ?? "low",
         resolutionTrace: dedupeTrace([...trace, `Sink(${target.definition.name})`]),
         codeSnippet: buildCodeSnippet(
           snippetData.prettySource,
@@ -257,6 +287,10 @@ function analyzeAst(
         ),
         headers: requestMetadata.headers.length > 0 ? requestMetadata.headers : undefined,
         body: requestMetadata.body,
+        detectionReason:
+          target.detectionReason && target.detectionReason.length > 0
+            ? target.detectionReason
+            : undefined,
       };
 
       findings.push(finding);

@@ -23,6 +23,7 @@ export interface Finding {
   urlTemplate: string | null;
   confidence: Confidence;
   resolutionTrace: string[];
+  detectionReason?: string[];
   codeSnippet?: string;
   headers?: FindingHeader[];
   body?: FindingBody | null;
