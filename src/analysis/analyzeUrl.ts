@@ -28,6 +28,7 @@ export async function analyzeUrlTarget(
     timeoutMs: options.timeoutMs,
     concurrency: options.concurrency,
     sameOriginOnly: options.sameOriginOnly,
+    ignoreTlsErrors: options.ignoreTlsErrors,
   });
   const sourceCollectionMs = elapsedMs(sourceCollectionStart);
 

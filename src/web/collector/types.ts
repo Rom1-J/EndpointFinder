@@ -29,4 +29,5 @@ export interface CollectSiteSourcesOptions {
   timeoutMs?: number;
   concurrency?: number;
   sameOriginOnly?: boolean;
+  ignoreTlsErrors?: boolean;
 }

@@ -48,6 +48,9 @@ node dist/cli/index.js ./dist --json > findings.json
 # URL target (direct mode)
 node dist/cli/index.js https://example.com --site-mode direct
 
+# URL target with self-signed TLS
+node dist/cli/index.js https://internal.example --site-mode direct --ignore-tls-errors
+
 # Export formats
 node dist/cli/index.js ./dist --export swagger > endpoints.openapi.json
 node dist/cli/index.js ./dist --export postman > endpoints.postman.json

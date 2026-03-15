@@ -117,6 +117,7 @@ analyze-endpoints https://example.com --site-mode direct
 | `--timeout-ms <n>` | Per-request timeout for URL mode |
 | `--same-origin-only` | Restrict crawl to entry origin (default behavior) |
 | `--cross-origin` | Allow cross-origin script crawling |
+| `--ignore-tls-errors` | Ignore TLS certificate validation errors in URL mode |
 | `--concurrency <n>` | Bounded parallelism for analysis/fetch/index work |
 | `--profile` | Print timing/profile report (stderr) |
 | `--help`, `-h` | Show help |
@@ -303,6 +304,7 @@ Tips:
 
 - Start with default same-origin crawl (faster, less noisy).
 - Use `--cross-origin` only when needed.
+- Use `--ignore-tls-errors` for self-signed/internal cert environments.
 - Cap fetch scope using `--max-remote-files`.
 - Use `--profile` to identify slow files and phases.
 

@@ -3,6 +3,7 @@ import { mapWithConcurrency, normalizeConcurrency } from "../../utils/concurrenc
 import { discoverScriptUrlsFromJavaScript, extractScriptUrlsFromHtml } from "./discovery";
 import { fetchTextResource } from "./fetchResource";
 import type { CollectedSiteSources, CollectSiteSourcesOptions } from "./types";
+import { withOptionalTlsIgnore } from "./tls";
 import {
   DEFAULT_MAX_REMOTE_FILES,
   DEFAULT_TIMEOUT_MS,
@@ -10,15 +11,15 @@ import {
   shouldTreatAsJavaScript,
 } from "./urlUtils";
 
-export async function collectSiteSources(
-  targetUrl: string,
-  options: CollectSiteSourcesOptions = {},
-): Promise<CollectedSiteSources> {
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
-  if (!fetchImpl) {
-    throw new Error("Fetch API is not available in this runtime");
-  }
+interface InternalCollectOptions extends CollectSiteSourcesOptions {
+  fetchImpl: typeof fetch;
+}
 
+async function collectSiteSourcesInternal(
+  targetUrl: string,
+  options: InternalCollectOptions,
+): Promise<CollectedSiteSources> {
+  const fetchImpl = options.fetchImpl;
   const maxRemoteFiles = options.maxRemoteFiles ?? DEFAULT_MAX_REMOTE_FILES;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchConcurrency = normalizeConcurrency(options.concurrency);
@@ -206,4 +207,21 @@ export async function collectSiteSources(
     sources,
     errors,
   };
+}
+
+export async function collectSiteSources(
+  targetUrl: string,
+  options: CollectSiteSourcesOptions = {},
+): Promise<CollectedSiteSources> {
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  if (!fetchImpl) {
+    throw new Error("Fetch API is not available in this runtime");
+  }
+
+  return withOptionalTlsIgnore(options.ignoreTlsErrors === true, () =>
+    collectSiteSourcesInternal(targetUrl, {
+      ...options,
+      fetchImpl,
+    }),
+  );
 }

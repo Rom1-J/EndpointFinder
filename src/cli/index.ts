@@ -22,6 +22,7 @@ interface CliOptions {
   timeoutMs?: number;
   concurrency?: number;
   sameOriginOnly: boolean;
+  ignoreTlsErrors: boolean;
   profile: boolean;
   help: boolean;
 }
@@ -49,7 +50,7 @@ function usage(): string {
     "  analyze-endpoints <path|url> [--json] [--export <swagger|postman|burp>] [--config <file>] [--unresolved]",
     "                   [--site-mode <direct|clone>] [--clone-dir <dir>]",
     "                   [--max-remote-files <n>] [--timeout-ms <n>] [--same-origin-only]",
-    "                   [--cross-origin]",
+    "                   [--cross-origin] [--ignore-tls-errors]",
     "                   [--concurrency <n>] [--profile]",
     "",
     "Examples:",
@@ -70,6 +71,7 @@ function parseArgs(argv: string[]): CliOptions {
     json: false,
     includeUnresolved: false,
     sameOriginOnly: true,
+    ignoreTlsErrors: false,
     profile: false,
     help: false,
   };
@@ -103,6 +105,10 @@ function parseArgs(argv: string[]): CliOptions {
     }
     if (arg === "--cross-origin") {
       options.sameOriginOnly = false;
+      continue;
+    }
+    if (arg === "--ignore-tls-errors") {
+      options.ignoreTlsErrors = true;
       continue;
     }
     if (arg === "--profile") {
@@ -213,6 +219,7 @@ async function main() {
           timeoutMs: options.timeoutMs,
           concurrency: options.concurrency,
           sameOriginOnly: options.sameOriginOnly,
+          ignoreTlsErrors: options.ignoreTlsErrors,
           profile: options.profile,
         })
       : await analyzeProject(options.target, {
