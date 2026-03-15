@@ -8,6 +8,7 @@ import {
   resolveSpecifier,
   shouldAddDiscoveredSpecifier,
 } from "./urlUtils";
+import { extractViteDepMapSpecifiers } from "./viteDeps";
 
 export function extractScriptUrlsFromHtml(
   html: string,
@@ -93,6 +94,10 @@ export function discoverScriptUrlsFromJavaScript(
 
     discovered.add(resolved);
   };
+
+  extractViteDepMapSpecifiers(parsed.ast).forEach((specifier) => {
+    addSpecifier(specifier, false);
+  });
 
   traverse(parsed.ast, {
     ImportDeclaration(path) {
